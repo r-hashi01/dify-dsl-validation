@@ -38,9 +38,10 @@ Dify の import 自体は edge の dangling target をチェックしない。�
 """
 
 from __future__ import annotations
-import json
-from collections import Counter, defaultdict
 
+import json
+import re as _re
+from collections import Counter, defaultdict
 
 # Difyソース由来の定数
 # api/core/trigger/constants.py + api/core/workflow/node_factory.py
@@ -74,7 +75,6 @@ SKIP_TOPLEVEL_TYPES = frozenset({"custom-note"})
 # plugin_unique_identifier の正規表現
 # dify-plugin-daemon/pkg/entities/plugin_entities/identity.go
 # 形式: "[author/]plugin_id:version@checksum"
-import re as _re
 PLUGIN_UNIQUE_ID_RE = _re.compile(
     r"^(?:([a-z0-9_-]{1,64})/)?([a-z0-9_-]{1,255}):"
     r"([0-9]{1,4})(\.[0-9]{1,4}){1,3}(-\w{1,16})?@[a-f0-9]{32,64}$"
@@ -557,8 +557,10 @@ def _build_report(errors: list[dict], dsl: dict) -> str:
         lines.append(f"[{sev}][{code}] x{len(items)}")
         for e in items[:10]:
             loc = []
-            if e.get("node_id"): loc.append(f"node={e['node_id']}")
-            if e.get("edge_id"): loc.append(f"edge={e['edge_id']}")
+            if e.get("node_id"):
+                loc.append(f"node={e['node_id']}")
+            if e.get("edge_id"):
+                loc.append(f"edge={e['edge_id']}")
             suffix = f"  ({', '.join(loc)})" if loc else ""
             lines.append(f"  - {e['message']}{suffix}")
             if e.get("fix_hint"):
