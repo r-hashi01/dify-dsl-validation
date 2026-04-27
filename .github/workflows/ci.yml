@@ -40,3 +40,23 @@ jobs:
               sys.exit(1)
           print('all .py syntax OK')
           "
+
+      - name: Smoke test (office_legacy_to_md)
+        run: |
+          uv run python -c "
+          from office_legacy_to_md import main
+          r = main(open('sample/xls_extracted.txt').read())
+          assert r['success'], r
+          assert '## シート 1' in r['markdown']
+          print('legacy OK')
+          "
+
+      - name: Smoke test (office_modern_to_md)
+        run: |
+          uv run python -c "
+          from office_modern_to_md import main
+          r = main('https://example.invalid/x.doc', 'doc')
+          assert not r['success']
+          assert '旧形式' in r['error']
+          print('modern OK')
+          "
