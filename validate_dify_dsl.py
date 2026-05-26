@@ -533,6 +533,7 @@ def validate(dsl: dict) -> list[dict]:
 
 
 def _build_report(errors: list[dict], dsl: dict) -> str:
+    """技術者向けの構造化レポート(従来の出力)。"""
     wf = (dsl or {}).get("workflow") or {}
     g = wf.get("graph") or {}
     n_cnt = len(g.get("nodes") or [])
@@ -570,6 +571,392 @@ def _build_report(errors: list[dict], dsl: dict) -> str:
     return "\n".join(lines)
 
 
+# ============================================================
+# 🌸 やさしいレポート (非エンジニア向けの自然言語サマリ)
+# ============================================================
+#
+# エラーコードを「何が起きているか / なぜまずいか / どう直すか」の
+# 平易な日本語に翻訳して、Dify編集画面の運用者・教育担当者でも
+# 読めるレポートを作る。
+#
+# 構造化された errors[] は LLM 修復フロー用にそのまま温存し、
+# main() は両方 (`report_friendly` と `report_technical`) を返す。
+# CLI はデフォルトで friendly を表示する。
+
+_CODE_CATALOG: dict[str, dict] = {
+    # === 🔴 重大: import後に編集画面が真っ白になる/実行できない ===
+    "EDGE_DANGLING_SOURCE": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "もう存在しないノードへの線が残っている",
+        "why": "編集画面が真っ白になる原因。Difyが「あるはずのノードが見つからない」状態でクラッシュします。",
+        "fix": "yml の `edges:` 配列から、該当する線(edge)を削除してください。",
+    },
+    "EDGE_DANGLING_TARGET": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "もう存在しないノードへの線が残っている",
+        "why": "編集画面が真っ白になる原因。Difyが「あるはずのノードが見つからない」状態でクラッシュします。",
+        "fix": "yml の `edges:` 配列から、該当する線(edge)を削除してください。",
+    },
+    "NO_START_NODE": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "開始ノードがない",
+        "why": "ワークフローの実行ができません(実行時にエラーになります)。",
+        "fix": "`start` / `datasource` / `trigger-*` のいずれかのノードを追加してください。",
+    },
+    "MULTIPLE_START_NODES": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "開始ノードが複数ある",
+        "why": "どこから始まるか不定になり、想定外の動作になります。",
+        "fix": "開始ノードを1つだけにしてください。",
+    },
+    "NO_TERMINAL_NODE": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "終了ノード(end / answer)がない",
+        "why": "Workflowアプリは end、Chatflowアプリは answer ノードが必須です。",
+        "fix": "`end` または `answer` ノードを追加してください。",
+    },
+    "DEP_INVALID_UID_FORMAT": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "プラグイン識別子の書き方が誤り",
+        "why": "正しい形式 `[author/]name:N.N.N@hex` でないとプラグインが読み込まれません。",
+        "fix": "例: `langgenius/google:0.1.1@<32-64桁hex>` の形式に修正してください。",
+    },
+    "DEP_INVALID_TYPE": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "プラグイン依存の `type` が不正",
+        "why": "type は `github` / `marketplace` / `package` のいずれかである必要があります。",
+        "fix": "dependencies の `type` を正しい値に修正してください。",
+    },
+    "ITERATION_MISSING_START": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "イテレーションの開始ノードが欠落",
+        "why": "iterationコンテナの中に `iteration-start` が無いとループが回りません。",
+        "fix": "iterationの中に `iteration-start` ノードを追加してください。",
+    },
+    "LOOP_MISSING_START": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "ループの開始ノードが欠落",
+        "why": "loopコンテナの中に `loop-start` が無いと処理が始まりません。",
+        "fix": "loopの中に `loop-start` ノードを追加してください。",
+    },
+    "LOOP_MISSING_END": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "ループの終了ノードが欠落",
+        "why": "loopコンテナの中に `loop-end` が無いと処理が終わりません。",
+        "fix": "loopの中に `loop-end` ノードを追加してください。",
+    },
+    "DUPLICATE_NODE_ID": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "同じIDのノードが2つ以上ある",
+        "why": "Difyがノードを区別できず、編集・実行で不具合が出ます。",
+        "fix": "片方のノードのIDをユニークなものに変えてください。",
+    },
+    "DUPLICATE_EDGE_ID": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "同じIDの線(edge)が2つ以上ある",
+        "why": "Difyが線を区別できず、編集・実行で不具合が出ます。",
+        "fix": "片方の線のIDをユニークなものに変えてください。",
+    },
+    "NODE_MISSING_DATA": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "ノード定義の `data` セクションが欠落",
+        "why": "ノードのタイプ/タイトル/設定が読み込めずクラッシュします。",
+        "fix": "ノードに `data: {type, title, ...}` を追加してください。",
+    },
+    "NODE_MISSING_TYPE": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "ノードに `data.type` がない",
+        "why": "Difyがノードの種別を判別できません。",
+        "fix": "BlockEnum の値 (start/end/llm/code/if-else など) を `data.type` に設定してください。",
+    },
+    "UNKNOWN_NODE_TYPE": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "未知のノードタイプ",
+        "why": "Difyに存在しないノードタイプが指定されています。",
+        "fix": "BlockEnum の有効な値に修正してください。",
+    },
+    "NODE_MISSING_ID": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "ノードに `id` がない",
+        "why": "Difyが他のノードや線から参照できません。",
+        "fix": "ノードに一意なIDを追加してください。",
+    },
+    "NODE_MISSING_POSITION": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "ノードの座標 `position` がない",
+        "why": "編集画面の描画でクラッシュします。",
+        "fix": "ノードに `position: {x: <数値>, y: <数値>}` を追加してください。",
+    },
+    "EDGE_MISSING_SOURCE": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "線(edge)に `source` がない",
+        "why": "どのノードから出ている線か分かりません。",
+        "fix": "edge に `source` を追加してください。",
+    },
+    "EDGE_MISSING_TARGET": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "線(edge)に `target` がない",
+        "why": "どのノードへ向かう線か分かりません。",
+        "fix": "edge に `target` を追加してください。",
+    },
+    "PARSE_ERROR": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "YAMLの構文エラー",
+        "why": "そもそも読み込めません。",
+        "fix": "YAML構文を見直してください(インデント・コロン・引用符など)。",
+    },
+    "MISSING_APP": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "`app` セクションが無い",
+        "why": "Difyは `app` の存在を前提に動きます。",
+        "fix": "yml 最上位に `app: {name, mode, icon, ...}` を追加してください。",
+    },
+    "MISSING_WORKFLOW": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "`workflow` セクションが無い",
+        "why": "ワークフロー定義が読み込めません。",
+        "fix": "yml 最上位に `workflow:` を追加してください。",
+    },
+    "MISSING_GRAPH": {
+        "icon": "🔴", "severity_label": "重大",
+        "title": "`workflow.graph` が無い",
+        "why": "ノード・線の定義が読み込めません。",
+        "fix": "`workflow.graph: {nodes:[...], edges:[...]}` を追加してください。",
+    },
+    # === 🟡 注意: 動くが、別環境や運用で問題化する可能性 ===
+    "UNDECLARED_PLUGIN_REFERENCE": {
+        "icon": "🟡", "severity_label": "注意",
+        "title": "プラグイン宣言の漏れ",
+        "why": "現環境では動くが、DSLを別ワークスペース・別環境にimportすると動かなくなります。",
+        "fix": "`dependencies:` に該当のプラグインを marketplace または github 経由で追加してください。",
+    },
+    "UNREACHABLE_NODE": {
+        "icon": "🟡", "severity_label": "注意",
+        "title": "開始ノードから繋がっていないノードがある",
+        "why": "そのノードは実行されません。意図しないなら線(edge)を引いてください。",
+        "fix": "開始ノードからの経路上に線(edge)を追加するか、不要なら該当ノードを削除してください。",
+    },
+    "NODE_NO_OUTGOING": {
+        "icon": "🟡", "severity_label": "注意",
+        "title": "行き止まりノード(次への線がない)",
+        "why": "そこで処理が止まります。意図的でなければ次のノードへの線が必要です。",
+        "fix": "次のノードへの線を追加、または end / answer ノードへ接続してください。",
+    },
+    "EDGE_MISSING_SOURCE_HANDLE": {
+        "icon": "🟡", "severity_label": "注意",
+        "title": "線の出口情報 `sourceHandle` がない",
+        "why": "if-else など分岐があるノードで、どの分岐か判別できません。",
+        "fix": "`sourceHandle: 'source'` (if-else なら 'true' / 'false' / 'elif-xxx') を追加してください。",
+    },
+    "EDGE_MISSING_TARGET_HANDLE": {
+        "icon": "🟡", "severity_label": "注意",
+        "title": "線の入口情報 `targetHandle` がない",
+        "why": "Difyの描画・実行で予期しない動作になります。",
+        "fix": "`targetHandle: 'target'` を追加してください。",
+    },
+}
+
+
+def _parse_dangling_edge(edge_id: str) -> tuple[str, str]:
+    """`<src>-source-<tgt>-target` 形式から (src, tgt) を取り出す。失敗時は (edge_id, '')。"""
+    if not edge_id:
+        return ("", "")
+    if "-source-" in edge_id and edge_id.endswith("-target"):
+        body = edge_id[: -len("-target")]
+        src, _, tgt = body.partition("-source-")
+        return (src, tgt)
+    return (edge_id, "")
+
+
+def _node_title_map(dsl: dict) -> dict[str, str]:
+    """nodeId → 「ノードタイトル (タイプ)」の対応表を作る。"""
+    out: dict[str, str] = {}
+    g = ((dsl or {}).get("workflow") or {}).get("graph") or {}
+    for n in (g.get("nodes") or []):
+        if not isinstance(n, dict):
+            continue
+        nid = n.get("id") or ""
+        if not nid:
+            continue
+        data = n.get("data") or {}
+        title = (data.get("title") or "").strip() if isinstance(data, dict) else ""
+        ntype = (data.get("type") or "").strip() if isinstance(data, dict) else ""
+        if title and ntype:
+            out[nid] = f"「{title}」({ntype})"
+        elif title:
+            out[nid] = f"「{title}」"
+        elif ntype:
+            out[nid] = f"({ntype}ノード)"
+        else:
+            out[nid] = nid
+    return out
+
+
+def _describe_node(nid: str, titles: dict[str, str]) -> str:
+    """既知ならタイトル付き、未知なら「(削除済み)」を添えて返す。"""
+    if not nid:
+        return "(空)"
+    if nid in titles:
+        return f"{titles[nid]} `{nid}`"
+    return f"`{nid}` (※ 存在しない／削除済み)"
+
+
+def _build_friendly_report(errors: list[dict], dsl: dict) -> str:
+    """非エンジニア向けの自然言語レポート。"""
+    wf = (dsl or {}).get("workflow") or {}
+    g = wf.get("graph") or {}
+    n_cnt = len(g.get("nodes") or [])
+    e_cnt = len(g.get("edges") or [])
+    titles = _node_title_map(dsl)
+
+    err_cnt = sum(1 for e in errors if e["severity"] == "error")
+    warn_cnt = sum(1 for e in errors if e["severity"] == "warning")
+
+    head = [
+        "=" * 60,
+        "  Dify DSL 検査結果",
+        "=" * 60,
+        f"  ノード数: {n_cnt}  ／  線(edge)数: {e_cnt}",
+        "",
+    ]
+
+    if not errors:
+        head += [
+            "[判定] ✅ OK (問題は見つかりませんでした)",
+            "",
+        ]
+        return "\n".join(head)
+
+    head += [
+        f"[判定] {'🔴 NG (要修復)' if err_cnt else '🟡 注意あり'}",
+        f"   🔴 重大な問題: {err_cnt} 件",
+        f"   🟡 注意事項  : {warn_cnt} 件",
+        "",
+    ]
+
+    # 重大度ごとに分割
+    sev_groups: dict[str, list[dict]] = {"error": [], "warning": []}
+    for e in errors:
+        sev_groups.setdefault(e["severity"], []).append(e)
+
+    body: list[str] = []
+
+    def render_group(severity: str, header_text: str) -> None:
+        items = sev_groups.get(severity) or []
+        if not items:
+            return
+        # コード別にまとめる
+        by_code: dict[str, list[dict]] = defaultdict(list)
+        for it in items:
+            by_code[it["code"]].append(it)
+
+        body.append("=" * 60)
+        body.append(f"  {header_text}")
+        body.append("=" * 60)
+        body.append("")
+
+        # EDGE_DANGLING_SOURCE と TARGET があれば、まず「推測される状況」として
+        # 「削除済みの中間ノード」を可視化する (最重要シグナル)
+        dangling_src = by_code.get("EDGE_DANGLING_SOURCE") or []
+        dangling_tgt = by_code.get("EDGE_DANGLING_TARGET") or []
+        if dangling_src or dangling_tgt:
+            missing_nodes: dict[str, dict[str, list[str]]] = defaultdict(
+                lambda: {"upstream": [], "downstream": []}
+            )
+            for it in dangling_src:
+                src, tgt = _parse_dangling_edge(it.get("edge_id") or "")
+                missing_nodes[src]["downstream"].append(tgt)
+            for it in dangling_tgt:
+                src, tgt = _parse_dangling_edge(it.get("edge_id") or "")
+                missing_nodes[tgt]["upstream"].append(src)
+
+            if missing_nodes:
+                body.append(
+                    f"💡 [中間ノードが消えた痕跡]  {len(missing_nodes)} 箇所で、"
+                    "ノードが削除されたまま線(edge)だけが残っています:"
+                )
+                body.append("")
+                idx = 0
+                for mid_id, ctx in missing_nodes.items():
+                    idx += 1
+                    ups = ", ".join(_describe_node(u, titles) for u in ctx["upstream"]) or "(なし)"
+                    dns = ", ".join(_describe_node(d, titles) for d in ctx["downstream"]) or "(なし)"
+                    body.append(f"   箇所{idx}: {ups}")
+                    body.append(f"         │")
+                    body.append(f"         ▼  ❌ `{mid_id}` (削除済み)")
+                    body.append(f"         │")
+                    body.append(f"         ▼")
+                    body.append(f"      {dns}")
+                    body.append("")
+                body.append(
+                    "   → 修復: 上記の関連する線(edge)を yml の `edges:` から削除。"
+                    "中間ノードのロジックはバージョン履歴から復元してください。"
+                )
+                body.append("")
+
+        problem_no = 0
+        for code, group in by_code.items():
+            problem_no += 1
+            cat = _CODE_CATALOG.get(code, {})
+            icon = cat.get("icon", "🔴" if severity == "error" else "🟡")
+            title = cat.get("title", code)
+            why = cat.get("why", "")
+            fix = cat.get("fix", "")
+            count = len(group)
+
+            body.append(f"【{problem_no}】{icon} {title} (該当 {count} 件)")
+            if why:
+                body.append(f"   📖 何が起きている?: {why}")
+
+            if code in ("EDGE_DANGLING_SOURCE", "EDGE_DANGLING_TARGET"):
+                # ペアの可視化は上の[中間ノードが消えた痕跡]で済んでいるので、
+                # ここでは edge ID 一覧だけ簡潔に出す
+                body.append("   📍 該当の線(edge) ID:")
+                for it in group[:10]:
+                    body.append(f"      - {it.get('edge_id', '(不明)')}")
+                if len(group) > 10:
+                    body.append(f"      ... 他 {len(group) - 10} 件")
+            else:
+                body.append("   📍 該当箇所:")
+                for it in group[:10]:
+                    parts: list[str] = []
+                    if it.get("node_id"):
+                        parts.append(_describe_node(it["node_id"], titles))
+                    if it.get("edge_id"):
+                        parts.append(f"線 `{it['edge_id']}`")
+                    where = " ／ ".join(parts) if parts else ""
+                    msg = it.get("message", "")
+                    if where:
+                        body.append(f"      - {where}")
+                        body.append(f"        {msg}")
+                    else:
+                        body.append(f"      - {msg}")
+                if len(group) > 10:
+                    body.append(f"      ... 他 {len(group) - 10} 件")
+
+            if fix:
+                body.append(f"   ✅ 修復方法: {fix}")
+            body.append("")
+
+    render_group("error", "⚠️  重大な問題 (このままだと編集画面が開かない／実行できない)")
+    render_group("warning", "💡 注意事項 (動くが、別環境への持ち出しや運用で問題化の可能性)")
+
+    # まとめ
+    body.append("=" * 60)
+    body.append("  📋 まとめ (どこから手を付けるか)")
+    body.append("=" * 60)
+    body.append("")
+    if err_cnt:
+        body.append(f"   1. まず 🔴 重大な問題 {err_cnt} 件を修復(編集画面を開けるようにする)")
+    if warn_cnt:
+        n = 2 if err_cnt else 1
+        body.append(f"   {n}. 続いて 🟡 注意事項 {warn_cnt} 件を修復(別環境への持ち出しに備える)")
+    body.append(f"   {3 if err_cnt and warn_cnt else 2}. 修復後、再度このバリデータを実行して全部 OK になることを確認")
+    body.append("")
+
+    return "\n".join(head + body)
+
+
 # ---- Dify コードノード エントリーポイント ----
 def main(dsl_text: str) -> dict:
     try:
@@ -595,7 +982,8 @@ def main(dsl_text: str) -> dict:
     return {
         "is_valid": err_cnt == 0,
         "errors": errors,
-        "report": _build_report(errors, dsl),
+        "report": _build_friendly_report(errors, dsl),
+        "report_technical": _build_report(errors, dsl),
         "graph": graph,
         "summary": {
             "error_count": err_cnt,
@@ -609,11 +997,22 @@ def main(dsl_text: str) -> dict:
 # ---- CLI ----
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) != 2:
-        print("usage: uv run validate_dify_dsl.py <dsl.yml>", file=sys.stderr)
+    args = [a for a in sys.argv[1:] if a]
+    show_technical = False
+    if "--technical" in args:
+        show_technical = True
+        args.remove("--technical")
+    if len(args) != 1:
+        print(
+            "usage: uv run validate_dify_dsl.py <dsl.yml> [--technical]",
+            file=sys.stderr,
+        )
         sys.exit(2)
-    with open(sys.argv[1], encoding="utf-8") as f:
+    with open(args[0], encoding="utf-8") as f:
         text = f.read()
     result = main(text)
-    print(result["report"])
+    if show_technical:
+        print(result.get("report_technical") or result["report"])
+    else:
+        print(result["report"])
     sys.exit(0 if result["is_valid"] else 1)
