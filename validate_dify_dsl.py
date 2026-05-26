@@ -230,16 +230,31 @@ def _validate_plugin_references(graph: dict, deps: list) -> list[dict]:
 
     errs: list[dict] = []
     for ref in _collect_plugin_references(graph):
-        # 参照は "author/name" または "name" または "name/tool_name" 形式
-        head = ref.split("/", 1)[0] if "/" in ref else ref
-        ref_base = ref.rsplit("/", 1)[-1] if "/" in ref else ref
-        if ref in declared_ids or head in declared_ids or ref_base in declared_ids:
+        # Difyのプラグイン参照は2層構造:
+        #   dependencies に書くもの   = "<author>/<plugin>"  (例: "langgenius/gemini")
+        #   ノードが参照するもの       = それに provider/tool/model を足した形
+        #                               (例: "langgenius/gemini/google")
+        # 参照 ref から「プラグイン名部分(最初の2セグメント)」を取り出して
+        # dependencies と突き合わせる。
+        parts = ref.split("/")
+        # 可能な「プラグイン名」候補:
+        #   - 完全一致: ref そのもの
+        #   - "<author>/<plugin>" 形式 (2セグメントまで)
+        #   - 1セグメント (author 省略形)
+        candidates = {ref}
+        if len(parts) >= 2:
+            candidates.add("/".join(parts[:2]))  # 最初の2セグメント
+            candidates.add(parts[1])              # name部分(author省略形)
+        candidates.add(parts[0])                  # 先頭セグメント
+        if candidates & declared_ids:
             continue
+        plugin_part = "/".join(parts[:2]) if len(parts) >= 2 else ref
         errs.append(_err(
             "UNDECLARED_PLUGIN_REFERENCE",
-            f"ノードが参照する plugin '{ref}' が dependencies に宣言されていない",
+            f"ノードが参照するプラグイン '{plugin_part}' (参照パス: '{ref}') が "
+            f"dependencies に宣言されていない",
             severity="warning",
-            fix_hint=f"dependencies に '{ref}' を marketplace or github で追加",
+            fix_hint=f"dependencies に '{plugin_part}' を marketplace or github で追加",
         ))
     return errs
 
