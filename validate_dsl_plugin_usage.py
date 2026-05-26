@@ -581,6 +581,7 @@ def _validate_llm_usage(usage: dict, plugin: PluginDefinition) -> list[dict]:
 # ====== エントリーポイント ======
 
 def _build_report(errors: list[dict], usages: list[dict]) -> str:
+    """技術者向けの構造化レポート(従来の出力)。"""
     err_cnt = sum(1 for e in errors if e["severity"] == "error")
     warn_cnt = sum(1 for e in errors if e["severity"] == "warning")
     head = f"scanned={len(usages)} usages, error={err_cnt}, warning={warn_cnt}"
@@ -605,6 +606,178 @@ def _build_report(errors: list[dict], usages: list[dict]) -> str:
         if len(items) > 10:
             lines.append(f"  ... 他 {len(items)-10} 件")
     return "\n".join(lines)
+
+
+# ============================================================
+# 🌸 やさしいレポート (非エンジニア向け)
+# ============================================================
+
+_USAGE_CATALOG: dict[str, dict] = {
+    "PLUGIN_NOT_FOUND": {
+        "icon": "🔴", "title": "プラグイン本体が見つからない",
+        "why": "ノードが参照している **プラグイン名** (`<author>/<plugin>`) が、"
+               "dify公式リポジトリにもMarketplaceミラーにも見つかりません。"
+               "Difyの参照は2層構造で、dependencies に書くのが「プラグイン名」、"
+               "ノードはその中の provider / tool / model 名を参照します。"
+               "ここでエラーになっているのは前者「プラグイン本体」の方で、"
+               "綴り誤り or 未公開／削除済み or 識別パスの組み立てミスが考えられます。",
+        "fix": "plugin_id の綴りを確認 (例: `langgenius/gemini` が正しい綴りか)。"
+               "正しいプラグイン名を `dependencies:` に追加してください。",
+    },
+    "PROVIDER_NOT_FOUND": {
+        "icon": "🔴", "title": "provider が見つからない",
+        "why": "プラグイン本体は存在するが、その中に**参照している provider 名**が無いです。"
+               "(provider = プラグインの中のサブ機能。例: gemini プラグイン内の `google` provider)",
+        "fix": "ノード側の provider 名を、プラグインが提供している実際の provider 名に修正してください。",
+    },
+    "TOOL_NOT_FOUND": {
+        "icon": "🔴", "title": "tool が見つからない",
+        "why": "provider は存在するが、その中に**参照している tool 名**が無いです。"
+               "(tool = provider の中の個別機能。例: google provider 内の `google_search` tool)",
+        "fix": "ノード側の tool 名を、provider が提供している実際の tool 名に修正してください。",
+    },
+    "MODEL_NOT_FOUND": {
+        "icon": "🔴", "title": "model が見つからない",
+        "why": "provider は存在するが、その中に**参照している model 名**が無いです。"
+               "(model = LLM provider の中の個別モデル。例: openai provider 内の `gpt-4o` model)",
+        "fix": "ノード側の model 名を、provider が提供している実際の model 名に修正してください。",
+    },
+    "TOOL_PARAM_UNKNOWN": {
+        "icon": "🔴", "title": "tool に未定義のパラメータが渡されている",
+        "why": "プラグイン定義に無いキーが `tool_parameters` に含まれています。",
+        "fix": "余分なキーを削除、または正しいパラメータ名に修正してください。",
+    },
+    "TOOL_PARAM_MISSING_REQUIRED": {
+        "icon": "🔴", "title": "required パラメータが渡されていない",
+        "why": "tool が要求する必須パラメータが欠落しています。",
+        "fix": "プラグイン定義の required を確認し、不足パラメータを追加してください。",
+    },
+    "TOOL_PARAM_INVALID_OPTION": {
+        "icon": "🔴", "title": "select型パラメータに不正な値",
+        "why": "options に存在しない値が指定されています。",
+        "fix": "options に列挙されているいずれかの値に修正してください。",
+    },
+    "PLUGIN_LOCAL_PACKAGE_UNVERIFIABLE": {
+        "icon": "🟡", "title": "ローカル .difypkg は検証不可",
+        "why": "`dependencies.type: package` のローカルパッケージは、ネット越しに定義を確認できません。",
+        "fix": "パッケージ内容は手動で確認してください。",
+    },
+    "PARSE_ERROR": {
+        "icon": "🔴", "title": "YAMLの構文エラー",
+        "why": "そもそも読み込めません。",
+        "fix": "YAML構文を見直してください。",
+    },
+}
+
+
+def _build_friendly_report(errors: list[dict], usages: list[dict]) -> str:
+    """非エンジニア向けの自然言語レポート。"""
+    err_cnt = sum(1 for e in errors if e["severity"] == "error")
+    warn_cnt = sum(1 for e in errors if e["severity"] == "warning")
+
+    head = [
+        "=" * 60,
+        "  Dify プラグイン使用状況 検査結果",
+        "=" * 60,
+        f"  スキャンしたノード: {len(usages)} 件",
+        "",
+    ]
+
+    if not errors:
+        head += ["[判定] ✅ OK (プラグインの使い方に問題ありません)", ""]
+        return "\n".join(head)
+
+    head += [
+        f"[判定] {'🔴 NG (要修復)' if err_cnt else '🟡 注意あり'}",
+        f"   🔴 重大な問題: {err_cnt} 件",
+        f"   🟡 注意事項  : {warn_cnt} 件",
+        "",
+    ]
+
+    sev_groups: dict[str, list[dict]] = {"error": [], "warning": []}
+    for e in errors:
+        sev_groups.setdefault(e["severity"], []).append(e)
+
+    body: list[str] = []
+
+    def render(severity: str, header_text: str) -> None:
+        items = sev_groups.get(severity) or []
+        if not items:
+            return
+        by_code: dict[str, list[dict]] = defaultdict(list)
+        for it in items:
+            by_code[it["code"]].append(it)
+
+        body.append("=" * 60)
+        body.append(f"  {header_text}")
+        body.append("=" * 60)
+        body.append("")
+
+        problem_no = 0
+        for code, group in by_code.items():
+            problem_no += 1
+            cat = _USAGE_CATALOG.get(code, {})
+            icon = cat.get("icon", "🔴" if severity == "error" else "🟡")
+            title = cat.get("title", code)
+            why = cat.get("why", "")
+            fix = cat.get("fix", "")
+
+            # 同じ plugin_id をまとめて1件として表示する
+            by_plugin: dict[str, list[dict]] = defaultdict(list)
+            for it in group:
+                key = it.get("plugin_id") or "(不明)"
+                by_plugin[key].append(it)
+
+            body.append(f"【{problem_no}】{icon} {title} (該当 {len(group)} 件 / {len(by_plugin)} プラグイン)")
+            if why:
+                body.append(f"   📖 何が起きている?: {why}")
+            body.append("   📍 該当プラグイン:")
+            for pid, members in by_plugin.items():
+                node_ids = [m.get("node_id") for m in members if m.get("node_id")]
+                tool_names = [m.get("tool_name") for m in members if m.get("tool_name")]
+                model_names = [m.get("model_name") for m in members if m.get("model_name")]
+                extra_parts: list[str] = []
+                if tool_names:
+                    extra_parts.append("tool=" + ", ".join(sorted(set(tool_names))))
+                if model_names:
+                    extra_parts.append("model=" + ", ".join(sorted(set(model_names))))
+                if node_ids:
+                    extra_parts.append(f"使用ノード {len(set(node_ids))} 箇所")
+                extra = " / ".join(extra_parts)
+                body.append(f"      - `{pid}` ({extra})" if extra else f"      - `{pid}`")
+            if fix:
+                body.append(f"   ✅ 修復方法: {fix}")
+            body.append("")
+
+    render("error", "⚠️  重大な問題 (このままだとプラグインが動かない)")
+    render("warning", "💡 注意事項 (動くが、運用や移行で問題化の可能性)")
+
+    body.append("=" * 60)
+    body.append("  📋 まとめ")
+    body.append("=" * 60)
+    body.append("")
+    step = 0
+    if err_cnt:
+        step += 1
+        body.append(f"   {step}. まず 🔴 重大な問題 {err_cnt} 件を修復(プラグイン参照を直す)")
+    if warn_cnt:
+        step += 1
+        verb = "続いて" if err_cnt else "まず"
+        body.append(f"   {step}. {verb} 🟡 注意事項 {warn_cnt} 件を確認")
+    body.append("")
+    body.append(
+        "   💡 Difyのプラグイン参照は2層構造 ↓"
+    )
+    body.append("     ┌─────────────────────────────────────────────────────┐")
+    body.append("     │ dependencies に書くもの                              │")
+    body.append("     │   = プラグイン名 (例: `langgenius/gemini`)           │")
+    body.append("     │                          ↓ その中に                  │")
+    body.append("     │ ノードが参照するもの                                 │")
+    body.append("     │   = provider / tool / model 名 (例: `google`)        │")
+    body.append("     └─────────────────────────────────────────────────────┘")
+    body.append("")
+
+    return "\n".join(head + body)
 
 
 def main(dsl_text: str, plugin_cache: dict | None = None) -> dict:
@@ -655,7 +828,8 @@ def main(dsl_text: str, plugin_cache: dict | None = None) -> dict:
     return {
         "is_valid": err_cnt == 0,
         "errors": errors,
-        "report": _build_report(errors, usages),
+        "report": _build_friendly_report(errors, usages),
+        "report_technical": _build_report(errors, usages),
         "summary": {
             "error_count": err_cnt,
             "warning_count": warn_cnt,
@@ -666,12 +840,22 @@ def main(dsl_text: str, plugin_cache: dict | None = None) -> dict:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: uv run validate_dsl_plugin_usage.py <dsl.yml>",
-              file=sys.stderr)
+    args = [a for a in sys.argv[1:] if a]
+    show_technical = False
+    if "--technical" in args:
+        show_technical = True
+        args.remove("--technical")
+    if len(args) != 1:
+        print(
+            "usage: uv run validate_dsl_plugin_usage.py <dsl.yml> [--technical]",
+            file=sys.stderr,
+        )
         sys.exit(2)
-    with open(sys.argv[1], encoding="utf-8") as f:
+    with open(args[0], encoding="utf-8") as f:
         text = f.read()
     result = main(text)
-    print(result["report"])
+    if show_technical:
+        print(result.get("report_technical") or result["report"])
+    else:
+        print(result["report"])
     sys.exit(0 if result["is_valid"] else 1)

@@ -60,11 +60,19 @@ DSL の tool / llm ノードが参照する plugin の実定義と整合する�
 
 ```bash
 # CLI (uv の PEP 723 inline script metadata で依存自動解決)
-uv run validate_dify_dsl.py <dsl.yml>
+uv run validate_dify_dsl.py <dsl.yml>             # やさしいレポート (デフォルト)
+uv run validate_dify_dsl.py <dsl.yml> --technical # 技術者向けの構造化レポート
+
 uv run validate_dsl_plugin_usage.py <dsl.yml>
+uv run validate_dsl_plugin_usage.py <dsl.yml> --technical
 ```
 
 終了コード: OK=0 / エラーあり=1
+
+### レポートの2モード
+
+- **やさしいレポート (デフォルト)** — 非エンジニア向け。エラーコードを「何が起きていて／なぜまずいか／どう直すか」の自然言語に翻訳し、🔴重大／🟡注意 のアイコンで重要度を可視化。EDGE_DANGLING 系は「**中間ノードが消えた痕跡**」として上流／削除済み／下流の3層を絵で表示。
+- **技術者向けレポート (`--technical`)** — エラーコード `[ERROR][CODE]` 形式の従来出力。LLM修復フロー・プログラム連携向け。
 
 ### Dify コードノードとして
 
@@ -73,7 +81,8 @@ uv run validate_dsl_plugin_usage.py <dsl.yml>
 
 - `is_valid` (boolean)
 - `errors` (array[object]) — `{code, severity, message, node_id, fix_hint, ...}`
-- `report` (string) — 人間可読サマリ
+- `report` (string) — 人間可読サマリ (やさしいレポート)
+- `report_technical` (string) — 技術者向けの構造化レポート (LLM修復用)
 - `graph` (object) (`validate_dify_dsl.py` のみ)
 - `summary` (object) — カウント
 
