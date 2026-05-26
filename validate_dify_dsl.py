@@ -1007,6 +1007,154 @@ def _build_friendly_report(errors: list[dict], dsl: dict) -> str:
 
 
 # ---- Dify コードノード エントリーポイント ----
+# ---------------------------------------------------------------------------
+# --fix モード: 決定的に直せるパターンだけ自動修復する
+# ---------------------------------------------------------------------------
+# 対象 (Tier 1):
+#   - EDGE_DANGLING (中間ノード消失): A→X + X→B が揃っていれば A→B に直結
+#   - EDGE_DANGLING (片側のみ): edge を削除
+#   - EDGE_MISSING_SOURCE / EDGE_MISSING_TARGET: edge を削除
+#   - DUPLICATE_EDGE_ID: 先頭1本だけ残す
+#   - EDGE_MISSING_SOURCE_HANDLE / TARGET_HANDLE: 'source' / 'target' 補完
+#     (if-else は条件分岐 handle を持つので skip)
+# 対象外: NO_START_NODE / UNREACHABLE_NODE / プラグイン系 / コンテナ内部 など
+
+
+def _fix(dsl: dict) -> tuple[dict, list[str]]:
+    """壊れたDSLを Tier1 ルールで修復した dict と修復ログを返す。元は変更しない。"""
+    import copy
+    fixed = copy.deepcopy(dsl)
+    log: list[str] = []
+
+    graph = ((fixed or {}).get("workflow") or {}).get("graph") or {}
+    nodes = graph.get("nodes") or []
+    edges = list(graph.get("edges") or [])
+
+    # ノードIDセット (custom-note は edge 接続不可なので除外しない: id 比較のみ)
+    id_set = {n.get("id") for n in nodes if n.get("id")}
+
+    # ノードIDごとの type を引けるように
+    node_type = {n.get("id"): (n.get("data") or {}).get("type")
+                 for n in nodes if n.get("id")}
+
+    # ---- 1. DUPLICATE_EDGE_ID: 先頭だけ残す ----
+    seen_eids: set[str] = set()
+    deduped: list[dict] = []
+    for e in edges:
+        eid = e.get("id")
+        if eid and eid in seen_eids:
+            log.append(f"重複 edge id を削除: {eid}")
+            continue
+        if eid:
+            seen_eids.add(eid)
+        deduped.append(e)
+    edges = deduped
+
+    # ---- 2. EDGE_MISSING_SOURCE/TARGET: source/target が無い edge は削除 ----
+    cleaned: list[dict] = []
+    for e in edges:
+        if not e.get("source") or not e.get("target"):
+            log.append(f"source/target が欠落した edge を削除: {e.get('id')}")
+            continue
+        cleaned.append(e)
+    edges = cleaned
+
+    # ---- 3. EDGE_DANGLING: 消失ノードごとに in/out を集めて rewire or delete ----
+    # 消失ノード毎の (in_edges, out_edges) を集計
+    dangling_in: dict[str, list[dict]] = defaultdict(list)   # X が target
+    dangling_out: dict[str, list[dict]] = defaultdict(list)  # X が source
+    for e in edges:
+        if e.get("target") not in id_set:
+            dangling_in[e["target"]].append(e)
+        if e.get("source") not in id_set:
+            dangling_out[e["source"]].append(e)
+
+    edges_to_remove: set[int] = set()  # 削除対象 edge の id(オブジェクト) を保持
+    edges_to_add: list[dict] = []
+    # 全 dangling ノードを巡回 (in/out のキー和集合)
+    for missing in set(list(dangling_in.keys()) + list(dangling_out.keys())):
+        ins = dangling_in.get(missing, [])
+        outs = dangling_out.get(missing, [])
+        if ins and outs:
+            # rewire: cartesian product
+            for in_e in ins:
+                for out_e in outs:
+                    sh = in_e.get("sourceHandle") or "source"
+                    new_edge = {
+                        "data": {
+                            "isInIteration": (in_e.get("data") or {}).get("isInIteration", False),
+                            "isInLoop": (in_e.get("data") or {}).get("isInLoop", False),
+                            "sourceType": (in_e.get("data") or {}).get("sourceType"),
+                            "targetType": (out_e.get("data") or {}).get("targetType"),
+                        },
+                        "id": f"{in_e['source']}-{sh}-{out_e['target']}-target",
+                        "selected": False,
+                        "source": in_e["source"],
+                        "sourceHandle": sh,
+                        "target": out_e["target"],
+                        "targetHandle": out_e.get("targetHandle") or "target",
+                        "type": "custom",
+                        "zIndex": 0,
+                    }
+                    edges_to_add.append(new_edge)
+                    log.append(
+                        f"消失ノード '{missing}' を迂回: "
+                        f"{in_e['source']} → {out_e['target']} (新 edge 追加)"
+                    )
+            for e in ins + outs:
+                edges_to_remove.add(id(e))
+        else:
+            # 片側のみ → 削除
+            for e in ins + outs:
+                edges_to_remove.add(id(e))
+                log.append(
+                    f"消失ノード '{missing}' を参照する edge を削除: {e.get('id')}"
+                )
+
+    edges = [e for e in edges if id(e) not in edges_to_remove] + edges_to_add
+
+    # 新規 edge の id 重複を再除去 (rewire 後に偶発的に同一 id が生まれた場合)
+    seen_eids = set()
+    final: list[dict] = []
+    for e in edges:
+        eid = e.get("id")
+        if eid and eid in seen_eids:
+            log.append(f"修復後の edge id 重複を解消: {eid}")
+            continue
+        if eid:
+            seen_eids.add(eid)
+        final.append(e)
+    edges = final
+
+    # ---- 4. handle 補完 (if-else 以外) ----
+    for e in edges:
+        src = e.get("source")
+        if e.get("sourceHandle") is None:
+            if node_type.get(src) == "if-else":
+                # if-else は 'true'/'false'/case_id を持つので自動補完は危険
+                continue
+            e["sourceHandle"] = "source"
+            log.append(f"sourceHandle 補完: edge {e.get('id')}")
+        if e.get("targetHandle") is None:
+            e["targetHandle"] = "target"
+            log.append(f"targetHandle 補完: edge {e.get('id')}")
+
+    graph["edges"] = edges
+    fixed.setdefault("workflow", {}).setdefault("graph", {})
+    fixed["workflow"]["graph"]["edges"] = edges
+
+    return fixed, log
+
+
+def _dump_yaml(dsl: dict) -> str:
+    try:
+        import yaml  # type: ignore
+        return yaml.safe_dump(dsl, allow_unicode=True, sort_keys=False,
+                              default_flow_style=False)
+    except ImportError:
+        return json.dumps(dsl, ensure_ascii=False, indent=2)
+
+
 def main(dsl_text: str) -> dict:
     try:
         dsl = _parse(dsl_text)
@@ -1047,21 +1195,102 @@ def main(dsl_text: str) -> dict:
 if __name__ == "__main__":
     import sys
     args = [a for a in sys.argv[1:] if a]
-    show_technical = False
-    if "--technical" in args:
-        show_technical = True
-        args.remove("--technical")
+    show_technical = "--technical" in args
+    do_fix = "--fix" in args
+    dry_run = "--dry-run" in args
+    output_path: str | None = None
+    # -o / --output <path>
+    for flag in ("-o", "--output"):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                print(f"{flag} requires a path argument", file=sys.stderr)
+                sys.exit(2)
+            output_path = args[i + 1]
+            del args[i:i + 2]
+    args = [a for a in args
+            if a not in ("--technical", "--fix", "--dry-run")]
+
     if len(args) != 1:
         print(
-            "usage: uv run validate_dify_dsl.py <dsl.yml> [--technical]",
+            "usage: uv run validate_dify_dsl.py <dsl.yml>\n"
+            "       [--technical] [--fix [--dry-run] [-o <out.yml>]]",
             file=sys.stderr,
         )
         sys.exit(2)
-    with open(args[0], encoding="utf-8") as f:
+
+    input_path = args[0]
+    with open(input_path, encoding="utf-8") as f:
         text = f.read()
     result = main(text)
-    if show_technical:
-        print(result.get("report_technical") or result["report"])
-    else:
-        print(result["report"])
-    sys.exit(0 if result["is_valid"] else 1)
+
+    if not do_fix:
+        if show_technical:
+            print(result.get("report_technical") or result["report"])
+        else:
+            print(result["report"])
+        sys.exit(0 if result["is_valid"] else 1)
+
+    # --- --fix モード ---
+    if result["is_valid"]:
+        print("修復不要: エラーは検出されませんでした。", file=sys.stderr)
+        sys.exit(0)
+
+    try:
+        dsl = _parse(text)
+    except Exception as ex:
+        print(f"パース失敗 — 修復不可: {ex}", file=sys.stderr)
+        sys.exit(1)
+
+    fixed_dsl, fix_log = _fix(dsl if isinstance(dsl, dict) else {})
+    fixed_text = _dump_yaml(fixed_dsl)
+
+    # 修復後を再検証
+    after = main(fixed_text)
+
+    print("=" * 60, file=sys.stderr)
+    print(f"  自動修復ログ ({len(fix_log)} 件)", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+    for line in fix_log:
+        print(f"  ・{line}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(
+        f"修復前: error={result['summary']['error_count']} "
+        f"warning={result['summary']['warning_count']}",
+        file=sys.stderr,
+    )
+    print(
+        f"修復後: error={after['summary']['error_count']} "
+        f"warning={after['summary']['warning_count']}",
+        file=sys.stderr,
+    )
+    if after["summary"]["error_count"] > 0:
+        print(
+            "\n⚠️  未修復のエラーが残っています (構造判断が必要なため自動修復対象外):",
+            file=sys.stderr,
+        )
+        remaining_codes = sorted({e["code"] for e in after["errors"]
+                                  if e["severity"] == "error"})
+        for code in remaining_codes:
+            print(f"  - {code}", file=sys.stderr)
+        print("\n詳細は次のコマンドで確認:", file=sys.stderr)
+        print(f"  uv run validate_dify_dsl.py <出力ファイル>",
+              file=sys.stderr)
+
+    if dry_run:
+        print("\n[--dry-run] ファイルは書き出していません。", file=sys.stderr)
+        sys.exit(0)
+
+    # 出力先決定: 既定は <input>.fixed.yml
+    if output_path is None:
+        if input_path.endswith((".yml", ".yaml")):
+            base = input_path.rsplit(".", 1)[0]
+            ext = input_path.rsplit(".", 1)[1]
+            output_path = f"{base}.fixed.{ext}"
+        else:
+            output_path = input_path + ".fixed"
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(fixed_text)
+    print(f"\n修復済み yml を書き出しました: {output_path}", file=sys.stderr)
+    sys.exit(0)

@@ -63,9 +63,26 @@ DSL の tool / llm ノードが参照する plugin の実定義と整合する�
 uv run validate_dify_dsl.py <dsl.yml>             # やさしいレポート (デフォルト)
 uv run validate_dify_dsl.py <dsl.yml> --technical # 技術者向けの構造化レポート
 
+# --fix モード: 決定的に直せるパターンだけ自動修復した yml を書き出す
+uv run validate_dify_dsl.py <dsl.yml> --fix                  # <dsl>.fixed.yml に書き出し
+uv run validate_dify_dsl.py <dsl.yml> --fix -o out.yml       # 出力先指定
+uv run validate_dify_dsl.py <dsl.yml> --fix --dry-run        # 修復差分のみ表示
+
 uv run validate_dsl_plugin_usage.py <dsl.yml>
 uv run validate_dsl_plugin_usage.py <dsl.yml> --technical
 ```
+
+### `--fix` で自動修復するもの (Tier 1, 決定的に安全)
+
+| 対象 | 修復ロジック |
+|---|---|
+| EDGE_DANGLING (中間ノード消失) | `A→X` + `X→B` が揃っていれば `A→B` 1本に直結 |
+| EDGE_DANGLING (片側のみ) | 該当 edge を削除 |
+| EDGE_MISSING_SOURCE/TARGET | 該当 edge を削除 |
+| DUPLICATE_EDGE_ID | 先頭1本だけ残す |
+| EDGE_MISSING_SOURCE_HANDLE / TARGET_HANDLE | `'source'` / `'target'` 補完 (if-else は安全のため skip) |
+
+`NO_START_NODE` / `UNREACHABLE_NODE` / プラグイン系 / iteration・loop 内部構造などの **構造判断が要る** エラーは自動修復せず、修復後の残エラーとして報告する。元ファイルは絶対に上書きしない。
 
 終了コード: OK=0 / エラーあり=1
 
