@@ -756,11 +756,14 @@ def _build_friendly_report(errors: list[dict], usages: list[dict]) -> str:
     body.append("  📋 まとめ")
     body.append("=" * 60)
     body.append("")
+    step = 0
     if err_cnt:
-        body.append(f"   1. まず 🔴 重大な問題 {err_cnt} 件を修復(プラグイン参照を直す)")
+        step += 1
+        body.append(f"   {step}. まず 🔴 重大な問題 {err_cnt} 件を修復(プラグイン参照を直す)")
     if warn_cnt:
-        n = 2 if err_cnt else 1
-        body.append(f"   {n}. 続いて 🟡 注意事項 {warn_cnt} 件を確認")
+        step += 1
+        verb = "続いて" if err_cnt else "まず"
+        body.append(f"   {step}. {verb} 🟡 注意事項 {warn_cnt} 件を確認")
     body.append("")
     body.append(
         "   💡 Difyのプラグイン参照は2層構造 ↓"

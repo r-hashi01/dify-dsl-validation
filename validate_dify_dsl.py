@@ -870,6 +870,21 @@ def _build_friendly_report(errors: list[dict], dsl: dict) -> str:
         for it in items:
             by_code[it["code"]].append(it)
 
+        # 同じタイトル(=ユーザーから見て同じ問題)のコードをマージする。
+        # 例: EDGE_DANGLING_SOURCE と EDGE_DANGLING_TARGET は両方とも
+        # 「もう存在しないノードへの線が残っている」が原因なので1件として扱う。
+        # 構造: [(代表タイトル, [(code, [items]), ...]), ...]  (順序保持)
+        merged_groups: list[tuple[str, list[tuple[str, list[dict]]]]] = []
+        title_to_idx: dict[str, int] = {}
+        for code, group in by_code.items():
+            cat = _CODE_CATALOG.get(code, {})
+            title = cat.get("title", code)
+            if title in title_to_idx:
+                merged_groups[title_to_idx[title]][1].append((code, group))
+            else:
+                title_to_idx[title] = len(merged_groups)
+                merged_groups.append((title, [(code, group)]))
+
         body.append("=" * 60)
         body.append(f"  {header_text}")
         body.append("=" * 60)
@@ -915,30 +930,40 @@ def _build_friendly_report(errors: list[dict], dsl: dict) -> str:
                 body.append("")
 
         problem_no = 0
-        for code, group in by_code.items():
+        for title, code_group_pairs in merged_groups:
             problem_no += 1
-            cat = _CODE_CATALOG.get(code, {})
+            # 代表として最初のコードの catalog を使う(全コードが同じタイトル=同じ問題のはず)
+            first_code = code_group_pairs[0][0]
+            cat = _CODE_CATALOG.get(first_code, {})
             icon = cat.get("icon", "🔴" if severity == "error" else "🟡")
-            title = cat.get("title", code)
             why = cat.get("why", "")
             fix = cat.get("fix", "")
-            count = len(group)
+            # 全アイテムを1つにまとめる
+            all_items: list[dict] = [it for _, g in code_group_pairs for it in g]
+            count = len(all_items)
+            # マージ元のコードが複数あれば末尾に出す(技術者向け参考情報)
+            codes_used = [c for c, _ in code_group_pairs]
+            codes_suffix = ""
+            if len(codes_used) > 1:
+                codes_suffix = "  [内訳: " + ", ".join(
+                    f"{c}×{len(g)}" for c, g in code_group_pairs
+                ) + "]"
 
-            body.append(f"【{problem_no}】{icon} {title} (該当 {count} 件)")
+            body.append(f"【{problem_no}】{icon} {title} (該当 {count} 件){codes_suffix}")
             if why:
                 body.append(f"   📖 何が起きている?: {why}")
 
-            if code in ("EDGE_DANGLING_SOURCE", "EDGE_DANGLING_TARGET"):
-                # ペアの可視化は上の[中間ノードが消えた痕跡]で済んでいるので、
-                # ここでは edge ID 一覧だけ簡潔に出す
+            # 全コードが EDGE_DANGLING 系なら簡潔な edge ID 一覧
+            if all(c in ("EDGE_DANGLING_SOURCE", "EDGE_DANGLING_TARGET")
+                   for c in codes_used):
                 body.append("   📍 該当の線(edge) ID:")
-                for it in group[:10]:
+                for it in all_items[:12]:
                     body.append(f"      - {it.get('edge_id', '(不明)')}")
-                if len(group) > 10:
-                    body.append(f"      ... 他 {len(group) - 10} 件")
+                if len(all_items) > 12:
+                    body.append(f"      ... 他 {len(all_items) - 12} 件")
             else:
                 body.append("   📍 該当箇所:")
-                for it in group[:10]:
+                for it in all_items[:10]:
                     parts: list[str] = []
                     if it.get("node_id"):
                         parts.append(_describe_node(it["node_id"], titles))
@@ -951,8 +976,8 @@ def _build_friendly_report(errors: list[dict], dsl: dict) -> str:
                         body.append(f"        {msg}")
                     else:
                         body.append(f"      - {msg}")
-                if len(group) > 10:
-                    body.append(f"      ... 他 {len(group) - 10} 件")
+                if len(all_items) > 10:
+                    body.append(f"      ... 他 {len(all_items) - 10} 件")
 
             if fix:
                 body.append(f"   ✅ 修復方法: {fix}")
@@ -966,12 +991,16 @@ def _build_friendly_report(errors: list[dict], dsl: dict) -> str:
     body.append("  📋 まとめ (どこから手を付けるか)")
     body.append("=" * 60)
     body.append("")
+    step = 0
     if err_cnt:
-        body.append(f"   1. まず 🔴 重大な問題 {err_cnt} 件を修復(編集画面を開けるようにする)")
+        step += 1
+        body.append(f"   {step}. まず 🔴 重大な問題 {err_cnt} 件を修復(編集画面を開けるようにする)")
     if warn_cnt:
-        n = 2 if err_cnt else 1
-        body.append(f"   {n}. 続いて 🟡 注意事項 {warn_cnt} 件を修復(別環境への持ち出しに備える)")
-    body.append(f"   {3 if err_cnt and warn_cnt else 2}. 修復後、再度このバリデータを実行して全部 OK になることを確認")
+        step += 1
+        verb = "続いて" if err_cnt else "まず"
+        body.append(f"   {step}. {verb} 🟡 注意事項 {warn_cnt} 件を修復(別環境への持ち出しに備える)")
+    step += 1
+    body.append(f"   {step}. 修復後、再度このバリデータを実行して全部 OK になることを確認")
     body.append("")
 
     return "\n".join(head + body)
