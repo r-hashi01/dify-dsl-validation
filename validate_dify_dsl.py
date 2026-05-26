@@ -727,8 +727,13 @@ _CODE_CATALOG: dict[str, dict] = {
     "UNDECLARED_PLUGIN_REFERENCE": {
         "icon": "🟡", "severity_label": "注意",
         "title": "プラグイン宣言の漏れ",
-        "why": "現環境では動くが、DSLを別ワークスペース・別環境にimportすると動かなくなります。",
-        "fix": "`dependencies:` に該当のプラグインを marketplace または github 経由で追加してください。",
+        "why": "ノードが使っているプラグインが `dependencies:` に宣言されていません。"
+               "Difyの参照は2層構造になっていて、`dependencies:` には**プラグイン名**を、"
+               "ノードはその中の provider/tool/model 名を参照します。"
+               "例: dependencies=`langgenius/gemini`、ノードは `google` provider を参照。"
+               "現環境では動くが、DSLを別ワークスペース・別環境にimportすると動かなくなります。",
+        "fix": "ノードが参照している plugin 部分(`<author>/<name>` 形式)を `dependencies:` に "
+               "marketplace または github 経由で追加してください。",
     },
     "UNREACHABLE_NODE": {
         "icon": "🟡", "severity_label": "注意",

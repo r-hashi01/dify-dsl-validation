@@ -614,26 +614,33 @@ def _build_report(errors: list[dict], usages: list[dict]) -> str:
 
 _USAGE_CATALOG: dict[str, dict] = {
     "PLUGIN_NOT_FOUND": {
-        "icon": "🔴", "title": "プラグインが見つからない",
-        "why": "プラグインの綴り誤りか、未公開／削除済みプラグインの参照。"
-               "そのままだとノードが動かないか、Geminiのように `provider` 名が"
-               "抜けている書き方になっている可能性が高い (例: `langgenius/gemini` ではなく `langgenius/gemini/google`)。",
-        "fix": "plugin_id の綴りを確認、または `dependencies:` に正しい識別子で追加してください。",
+        "icon": "🔴", "title": "プラグイン本体が見つからない",
+        "why": "ノードが参照している **プラグイン名** (`<author>/<plugin>`) が、"
+               "dify公式リポジトリにもMarketplaceミラーにも見つかりません。"
+               "Difyの参照は2層構造で、dependencies に書くのが「プラグイン名」、"
+               "ノードはその中の provider / tool / model 名を参照します。"
+               "ここでエラーになっているのは前者「プラグイン本体」の方で、"
+               "綴り誤り or 未公開／削除済み or 識別パスの組み立てミスが考えられます。",
+        "fix": "plugin_id の綴りを確認 (例: `langgenius/gemini` が正しい綴りか)。"
+               "正しいプラグイン名を `dependencies:` に追加してください。",
     },
     "PROVIDER_NOT_FOUND": {
         "icon": "🔴", "title": "provider が見つからない",
-        "why": "そのプラグインに、参照している provider 名が存在しません。",
-        "fix": "正しい provider 名に修正してください。",
+        "why": "プラグイン本体は存在するが、その中に**参照している provider 名**が無いです。"
+               "(provider = プラグインの中のサブ機能。例: gemini プラグイン内の `google` provider)",
+        "fix": "ノード側の provider 名を、プラグインが提供している実際の provider 名に修正してください。",
     },
     "TOOL_NOT_FOUND": {
         "icon": "🔴", "title": "tool が見つからない",
-        "why": "そのプラグインに、参照している tool 名が存在しません。",
-        "fix": "正しい tool 名に修正してください。",
+        "why": "provider は存在するが、その中に**参照している tool 名**が無いです。"
+               "(tool = provider の中の個別機能。例: google provider 内の `google_search` tool)",
+        "fix": "ノード側の tool 名を、provider が提供している実際の tool 名に修正してください。",
     },
     "MODEL_NOT_FOUND": {
         "icon": "🔴", "title": "model が見つからない",
-        "why": "そのプラグインに、参照している model 名が存在しません。",
-        "fix": "正しい model 名に修正してください。",
+        "why": "provider は存在するが、その中に**参照している model 名**が無いです。"
+               "(model = LLM provider の中の個別モデル。例: openai provider 内の `gpt-4o` model)",
+        "fix": "ノード側の model 名を、provider が提供している実際の model 名に修正してください。",
     },
     "TOOL_PARAM_UNKNOWN": {
         "icon": "🔴", "title": "tool に未定義のパラメータが渡されている",
@@ -755,7 +762,16 @@ def _build_friendly_report(errors: list[dict], usages: list[dict]) -> str:
         n = 2 if err_cnt else 1
         body.append(f"   {n}. 続いて 🟡 注意事項 {warn_cnt} 件を確認")
     body.append("")
-    body.append("   💡 よくある原因: provider 名が抜けた書き方 (例: `langgenius/gemini` ではなく `langgenius/gemini/google`)")
+    body.append(
+        "   💡 Difyのプラグイン参照は2層構造 ↓"
+    )
+    body.append("     ┌─────────────────────────────────────────────────────┐")
+    body.append("     │ dependencies に書くもの                              │")
+    body.append("     │   = プラグイン名 (例: `langgenius/gemini`)           │")
+    body.append("     │                          ↓ その中に                  │")
+    body.append("     │ ノードが参照するもの                                 │")
+    body.append("     │   = provider / tool / model 名 (例: `google`)        │")
+    body.append("     └─────────────────────────────────────────────────────┘")
     body.append("")
 
     return "\n".join(head + body)
